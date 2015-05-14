@@ -5,21 +5,30 @@ const byte ELECT		= 0x10;
 const byte ELECTACK		= 0x11;
 const byte SYNC			= 0x12;
 const byte SYNCACK		= 0x13;
+const byte SYNCCORR		= 0X14;
+const byte DATA			= 0X20;
 
 const byte SYNCPHASE = 0xA0;
 const byte ACQUISITION = 0xA1;
+const byte SENDDATA = 0XA2;
+
+const byte SYNC_ATTEMPTS = 10;
 
 const unsigned long SYNC_TIMEOUT_MILLIS = 5000000;
 
 File sdFile;
 
-uint8_t sendBuffer[20];
-uint8_t receiveBuffer[20];
+unsigned int pingBuffer[20];
+unsigned long correctionBuffer[20];
+
 uint8_t seqnumSync = 0;
 size_t size = 0;
 
 boolean sent = false;
 boolean master = false;
+unsigned long timetosend = 0;
+
+byte indexSyncBuffer;
 
 byte phase;
 
@@ -57,6 +66,12 @@ void reboot()
 	delay(1000);
 }
 
+void configureLowLatency()
+{
+	Serial.println("SQ,16");
+	delay(100);
+}
+
 void configureSlave()
 {	
 	Serial.println("SM,0");
@@ -67,15 +82,6 @@ void configureMaster()
 {
 	Serial.println("SM,1");
 	delay(100);
-}
-
-void findDevice()
-{
-	Serial.println("IS10");
-	delay(10500);
-	String test = Serial.readString();
-	Serial.print("Ho trovato ");
-	Serial.println(test);
 }
 
 void connectTo(String address)
@@ -91,36 +97,7 @@ void killConnection()
 }
 //End bluetooth command
 
-/*
-void buildPacket(uint8_t * buffer, size_t * size){
-	*buffer = 'T';
-	*(buffer + 1) = 'S';
-	*(buffer + 2) = PING;
-	*(buffer + 3) = seq;
-	*(buffer + 4) = 0x0;
-	*(buffer + 5) = 0x0;
-	*(buffer + 6) = 0x0;
-	*(buffer + 7) = 0x0;
-	*size = 8;
-	return;
-}
 
-void buildReply(uint8_t * buffer, size_t * size, byte seqnumber){
-	*buffer = 's';
-	*(buffer + 1) = PINGREPLY;
-	*(buffer + 2) = seqnumber;
-	unsigned long d = micros();
-
-	Serial.print("time inviato ");
-	memcpy((buffer + 3), &d, 4);
-	*size = 7;
-}*/
-
-void incomingData()
-{
-	//store_in_buffer(micros());
-	Serial.println(micros() + correction);
-}
 
 void setup() {
 	pinMode(LED_BUILTIN, OUTPUT);
@@ -128,45 +105,9 @@ void setup() {
 	goInCommandMode();
 	configureSlave();
 	exitFromCommandMode();
-	attachInterrupt(1, incomingData, CHANGE);	
+	attachInterrupt(1, incomingData, CHANGE);
+	
 }
-
-
-
-/*
-void serialEvent(){
-	uint8_t *ptr;
-	endtime = micros();
-	ptr = receiveBuffer;
-
-
-	size = Serial.readBytes(receiveBuffer, 1);
-	if (*ptr != 's') return;
-	size = Serial.readBytes(receiveBuffer, 6);
-	if (size != 6) return;
-	switch (*ptr)
-	{
-	case PING:
-		buildReply(sendBuffer, &size, *(ptr + 1));
-		Serial.write(sendBuffer, 7);
-		break;
-	case PINGREPLY:
-		if (*(ptr + 1) == seq){
-			seq++;
-			ptr += 2;
-			memcpy(&timestamp, ptr, 4);
-			Serial.print("time ricevuto : ");
-			Serial.println(timestamp);
-			Serial.println(endtime);
-			Serial.println(starttime);
-			sent = false;
-		}
-
-	default:
-		break;
-	}
-
-}*/
 
 void serialEvent()
 {
@@ -203,19 +144,21 @@ void serialEvent()
 					clearSerial();
 
 					connectTo("0006667286D5");
-					phase = SYNCPHASE;
 					exitFromCommandMode();
+					phase = SYNCPHASE;
+					indexSyncBuffer = 0;
 					break;
 				case SYNC:
+
 					Serial.readBytes(&seqnum, 1);
+					seqnumSync = seqnum;
 					byte syncackpkt[8];
 					syncackpkt[0] = 'T';
 					syncackpkt[1] = 'S';
 					syncackpkt[2] = SYNCACK;
 					syncackpkt[3] = seqnum;
 					memcpy(syncackpkt + 4, &receptionTime, sizeof(receptionTime));
-					Serial.write(syncackpkt, 8);
-					digitalWrite(LED_BUILTIN, HIGH);					
+					Serial.write(syncackpkt, 8);				
 					break;
 				case SYNCACK:
 					Serial.readBytes(&seqnum, 1);
@@ -226,13 +169,66 @@ void serialEvent()
 						unsigned long time;
 						memcpy(&time, timeBuffer, sizeof(time));
 
-						correction =  (time + ((receptionTime - startSyncTime) / 2)) - receptionTime;
+						pingBuffer[indexSyncBuffer] = (receptionTime - startSyncTime);
+						correctionBuffer[indexSyncBuffer] = receptionTime - time;
+						indexSyncBuffer++;
 
-						goInCommandMode();
-						configureSlave();
-						killConnection();
+						if (indexSyncBuffer >= SYNC_ATTEMPTS)
+						{
+							unsigned long correctionMean = 0;
+							unsigned long pingMean = 0;
 
-						phase = 0;
+							for (int i = 0; i < SYNC_ATTEMPTS; i++)
+							{
+								correctionMean += correctionBuffer[i];
+								pingMean += pingBuffer[i];
+							}
+
+							correctionMean /= SYNC_ATTEMPTS;
+							pingMean /= SYNC_ATTEMPTS;
+							pingMean /= 2;
+
+								
+
+							unsigned long receiverCorrection = correctionMean + pingMean;
+
+							memset(timeBuffer, 0, 4);
+							memcpy(timeBuffer, &receiverCorrection, sizeof(receiverCorrection));
+
+							byte msgCorrection[8];
+							msgCorrection[0] = 'T';
+							msgCorrection[1] = 'S';
+							msgCorrection[2] = SYNCCORR;
+							msgCorrection[3] = seqnum;
+							memcpy(msgCorrection + 4, &receiverCorrection, sizeof(receiverCorrection));
+
+							Serial.write(msgCorrection, 8);
+
+							delay(1000);
+
+							goInCommandMode();
+							killConnection();
+							configureSlave();
+							exitFromCommandMode();
+
+							phase = SENDDATA;
+							digitalWrite(LED_BUILTIN, HIGH);
+						}
+						else
+						{
+							sent = false;
+						}
+					}
+					break;
+				case SYNCCORR:
+					Serial.readBytes(&seqnum, 1);
+					if (seqnum == seqnumSync)
+					{
+						byte timeBuffer[4];
+						Serial.readBytes(timeBuffer, 4);
+						memcpy(&correction, timeBuffer, sizeof(correction));
+						
+						phase = SENDDATA;
 						digitalWrite(LED_BUILTIN, HIGH);
 					}
 					break;
@@ -246,13 +242,11 @@ void serialEvent()
 	}
 }
 
-
-
 void loop(){
 	switch (phase)
 	{
 	case SYNCPHASE:
-		if (!sent)
+		if (!sent && indexSyncBuffer < SYNC_ATTEMPTS)
 		{
 			seqnumSync = (byte)random();
 			byte syncpkt[4];
@@ -270,6 +264,22 @@ void loop(){
 			{
 				sent = false;
 			}
+		}
+		break;
+	case SENDDATA:
+
+		timetosend = read_from_buffer();
+		if (timetosend != 0)
+		{
+			byte msgData[7];
+			msgData[0] = 'T';
+			msgData[1] = 'S';
+			msgData[2] = 0x20;
+			timestamp = micros() + correction;
+			memcpy(msgData + 3, &timestamp, sizeof(timestamp));
+			Serial.write(msgData, 7);
+			//Serial.println(timestamp);
+		//	delay(2000);
 		}
 		break;
 	default:
@@ -290,4 +300,11 @@ void loop(){
 		
 	}
 	*/
+}
+
+
+void incomingData()
+{
+	
+	store_in_buffer(1);
 }

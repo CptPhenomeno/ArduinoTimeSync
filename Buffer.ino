@@ -23,10 +23,10 @@ unsigned long read_from_buffer()
 {
 	// if the head isn't ahead of the tail, we don't have any characters
 	if (my_buf.head == my_buf.tail) {
-		return -1;        // quit with an error
+		return 0;        // quit with an error
 	}
 	else {
-		char data = my_buf.buffer[my_buf.tail];
+		unsigned long data = my_buf.buffer[my_buf.tail];
 		my_buf.tail = (unsigned int)(my_buf.tail + 1) % BUFFER_SIZE;
 		return data;
 	}

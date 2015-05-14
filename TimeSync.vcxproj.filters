@@ -22,5 +22,8 @@
     <ClInclude Include="Visual Micro\.TimeSync.vsarduino.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Visual Micro\.ArduinoTimeSync-gabriele.vsarduino.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
