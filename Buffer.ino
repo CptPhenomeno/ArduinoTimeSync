@@ -7,7 +7,7 @@ typedef struct circular_buffer
 	volatile unsigned int tail;
 }ring_buffer;
 
-circular_buffer my_buf = { { 0 }, 0, 0 };
+volatile circular_buffer my_buf = { { 0 }, 0, 0 };
 
 void store_in_buffer(unsigned long data)
 {
@@ -21,13 +21,16 @@ void store_in_buffer(unsigned long data)
 
 unsigned long read_from_buffer()
 {
+	noInterrupts();
 	// if the head isn't ahead of the tail, we don't have any characters
 	if (my_buf.head == my_buf.tail) {
+		interrupts();
 		return 0;        // quit with an error
 	}
 	else {
 		unsigned long data = my_buf.buffer[my_buf.tail];
 		my_buf.tail = (unsigned int)(my_buf.tail + 1) % BUFFER_SIZE;
+		interrupts();
 		return data;
 	}
 }
