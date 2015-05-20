@@ -1,44 +1,48 @@
-#include <SPI.h>
-#include <SD.h>
+//Type of message
+const byte ELECT				= 0x10;
+const byte ELECT_ACK			= 0x11;
+const byte SYNC					= 0x12;
+const byte SYNC_ACK				= 0x13;
+const byte SYNC_CORR			= 0X14;
+const byte DATA					= 0X20;
+const byte START_ACQUIRE		= 0x21;
+const byte STOP_ACQUIRE			= 0x22;
+const byte START_ACQUIRE_ACK	= 0x23;
+const byte STOP_ACQUIRE_ACK		= 0x24;
 
-const byte ELECT		 = 0x10;
-const byte ELECTACK		 = 0x11;
-const byte SYNC			 = 0x12;
-const byte SYNCACK		 = 0x13;
-const byte SYNCCORR		 = 0X14;
-const byte DATA			 = 0X20;
-const byte START_ACQUIRE = 0x21;
-const byte STOP_ACQUIRE  = 0x22;
-const byte START_ACQUIRE_ACK = 0x23;
-const byte STOP_ACQUIRE_ACK = 0x24;
+//Automata status
+const byte SYNC_PHASE		= 0xA0;
+const byte SEND_DATA_PHASE	= 0XA1;
+const byte SILENCE			= 0xA3;
 
-const byte SYNCPHASE = 0xA0;
-const byte ACQUISITION = 0xA1;
-const byte SENDDATA = 0XA2;
-
-const byte SYNC_ATTEMPTS = 1;
+const byte SYNC_ATTEMPTS = 40;
 
 const unsigned long SYNC_TIMEOUT_MICROS = 5000000;
 
-File sdFile;
+
+
+long double x[SYNC_ATTEMPTS];
+long double y[SYNC_ATTEMPTS];
+long double results[2] = { 0, 0 };
 
 long pingBuffer[SYNC_ATTEMPTS];
 long correctionBuffer[SYNC_ATTEMPTS];
-volatile boolean interruptReceived = false;
 
 uint8_t seqnumSync = 0;
 
 boolean sent = false;
-boolean master = false;
 boolean waitLow = false;
 boolean waitHigh = true;
 
+long double angular_coefficient = 0;
+long double linear_factor = 0;
+long startTimeSync = 0;
 
 long timetosend = 0;
 
 byte indexSyncBuffer;
 
-byte phase = 0;
+byte phase = SILENCE;
 
 long startSyncTime = 0;
 long correction = 0;
@@ -138,7 +142,6 @@ void setup() {
 	configureLowLatency();
 	reboot();
 	delay(2000);
-	//attachInterrupt(0, incomingData, CHANGE);
 }
 
 void serialEvent()
@@ -152,12 +155,12 @@ void serialEvent()
 		if (headerChar == 'S')
 		{
 			byte msgType;
-			byte seqnum;
+			byte checknum;
 			Serial.readBytes(&msgType, 1);
 			switch (msgType)
 			{
 			case START_ACQUIRE:
-				phase = SENDDATA;
+				phase = SEND_DATA_PHASE;
 				byte startAcquireAck[3];
 				startAcquireAck[0] = 'T';
 				startAcquireAck[1] = 'S';
@@ -166,7 +169,7 @@ void serialEvent()
 				Serial.write(startAcquireAck, 3);
 				break;
 			case STOP_ACQUIRE:
-				phase = 0;
+				phase = SILENCE;
 				byte stopAcquireAck[3];
 				stopAcquireAck[0] = 'T';
 				stopAcquireAck[1] = 'S';
@@ -175,12 +178,14 @@ void serialEvent()
 				Serial.write(stopAcquireAck, 3);
 				break;
 			case ELECT:
-				Serial.readBytes(&seqnum, 1);
+				char mac[13];
+				Serial.readBytes(&checknum, 1);
+				Serial.readBytes(mac, 12);
 				byte ack[4];
 				ack[0] = 'T';
 				ack[1] = 'S';
-				ack[2] = ELECTACK;
-				ack[3] = seqnum;
+				ack[2] = ELECT_ACK;
+				ack[3] = checknum;
 				Serial.write(ack, 4);
 				delay(500);
 				//TODO
@@ -191,42 +196,51 @@ void serialEvent()
 				goInCommandMode();
 				clearSerial();
 
-				connectTo("0006667286D5");
+				connectTo(mac);
 				exitFromCommandMode();
-				phase = SYNCPHASE;
+				phase = SYNC_PHASE;
 				indexSyncBuffer = 0;
 				break;
 			case SYNC:
-				Serial.readBytes(&seqnum, 1);
-				seqnumSync = seqnum;
+				Serial.readBytes(&checknum, 1);
+				seqnumSync = checknum;
 				byte syncackpkt[8];
 				syncackpkt[0] = 'T';
 				syncackpkt[1] = 'S';
-				syncackpkt[2] = SYNCACK;
-				syncackpkt[3] = seqnum;
+				syncackpkt[2] = SYNC_ACK;
+				syncackpkt[3] = checknum;
 				memcpy(syncackpkt + 4, &receptionTime, sizeof(receptionTime));
 				Serial.write(syncackpkt, 8);
 				break;
-			case SYNCACK:
-				Serial.readBytes(&seqnum, 1);
-				if (seqnum == seqnumSync)
+			case SYNC_ACK:
+				Serial.readBytes(&checknum, 1);
+				if (checknum == seqnumSync)
 				{
+					if (indexSyncBuffer == 0)
+						startTimeSync = receptionTime;
 					byte timeBuffer[4];
 					Serial.readBytes(timeBuffer, 4);
 					long time;
 					memcpy(&time, timeBuffer, sizeof(time));
 
 					pingBuffer[indexSyncBuffer] = (receptionTime - startSyncTime);
+
+					if (pingBuffer[indexSyncBuffer] > 70000){
+						sent = false;
+						break;
+					}
+
 					correctionBuffer[indexSyncBuffer] = (long)receptionTime - (long)time;
+					x[indexSyncBuffer] = receptionTime - startTimeSync;
+					y[indexSyncBuffer] = (correctionBuffer[indexSyncBuffer] - pingBuffer[indexSyncBuffer]/2);
+			
+					delay(500);
+
 					indexSyncBuffer++;
 
-					if (indexSyncBuffer >= SYNC_ATTEMPTS)
+
+					if (indexSyncBuffer >= SYNC_ATTEMPTS )
 					{
-						//long correctionMean = 0;
-						//unsigned long pingMean = 0;
-
-						//sortPings();
-
 						correctionMean = 0;
 						pingMean = 0;
 
@@ -242,18 +256,23 @@ void serialEvent()
 
 						long receiverCorrection = correctionMean - pingMean;
 
+						simpLinReg(x, y, results, SYNC_ATTEMPTS);
+
 						memset(timeBuffer, 0, 4);
 						memcpy(timeBuffer, &receiverCorrection, sizeof(receiverCorrection));
 
-						byte msgCorrection[8];
+						byte msgCorrection[20];
 						msgCorrection[0] = 'T';
 						msgCorrection[1] = 'S';
-						msgCorrection[2] = SYNCCORR;
-						msgCorrection[3] = seqnum;
-						memcpy(msgCorrection + 4, &receiverCorrection, sizeof(receiverCorrection));
+						msgCorrection[2] = SYNC_CORR;
+						msgCorrection[3] = checknum;
+						memcpy(msgCorrection + 4, &results[0], sizeof(results[0]));
+						memcpy(msgCorrection + 12, &results[1], sizeof(results[1]));
 
-						Serial.write(msgCorrection, 8);
 
+						angular_coefficient = results[0];
+						linear_factor = results[1];
+						
 						delay(1000);
 
 						goInCommandMode();
@@ -261,7 +280,7 @@ void serialEvent()
 						configureSlave();
 						exitFromCommandMode();
 
-						phase = 0;
+						phase = SILENCE;
 					}
 					else
 					{
@@ -269,15 +288,19 @@ void serialEvent()
 					}
 				}
 				break;
-			case SYNCCORR:
-				Serial.readBytes(&seqnum, 1);
-				if (seqnum == seqnumSync)
+			case SYNC_CORR:
+				Serial.readBytes(&checknum, 1);
+				if (checknum == seqnumSync)
 				{
-					byte timeBuffer[4];
-					Serial.readBytes(timeBuffer, 4);
-					memcpy(&correction, timeBuffer, sizeof(correction));
+					byte timeBuffer[8];
+					Serial.readBytes(timeBuffer, 8);
+					memcpy(&angular_coefficient, timeBuffer, sizeof(angular_coefficient));
+					Serial.readBytes(timeBuffer, 8);
+					memcpy(&linear_factor, timeBuffer, sizeof(linear_factor));
 
-					phase = 0;
+					angular_coefficient = 1 / angular_coefficient;
+					linear_factor = -linear_factor;
+					phase = SILENCE;
 				}
 				break;
 			default:
@@ -290,9 +313,13 @@ void serialEvent()
 }
 
 void loop(){
+
+	long double tmp = 0;
+	long double tmp2 = 0;
+
 	switch (phase)
 	{
-	case SYNCPHASE:
+	case SYNC_PHASE:
 		if (!sent && indexSyncBuffer < SYNC_ATTEMPTS)
 		{
 			seqnumSync = (byte)random();
@@ -309,13 +336,16 @@ void loop(){
 		{
 			if (micros() - startSyncTime > SYNC_TIMEOUT_MICROS)
 			{
+				blinkDebug(10, 100);
 				sent = false;
 			}
 		}
 		break;
-	case SENDDATA:
+	case SEND_DATA_PHASE:
 		//timetosend = read_from_buffer();
-		timetosend = micros() + correction;
+		tmp = (micros() - startTimeSync);
+		tmp2 = angular_coefficient*tmp;
+		timetosend = micros() - (tmp2 + linear_factor);
 		if ((analogRead(0) >= 500 && waitHigh) || (analogRead(0) < 500 && waitLow))
 		{
 			byte msgData[7];
@@ -339,10 +369,4 @@ void loop(){
 	default:
 		break;
 	}
-}
-
-void incomingData()
-{
-	if (phase == SENDDATA)
-		store_in_buffer(micros() + correction);
 }
